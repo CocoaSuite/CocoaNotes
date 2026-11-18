@@ -163,9 +163,8 @@ function card(nb) {
   img.onload = () => img.classList.add('in')
   thumb.append(nb.type === 'canvas' ? h('div', { class: 'pgc', style: { background: P.bg } }, img) : h('div', { class: 'pgm', style: { background: P.bg } }, h('i', { class: 'spine', style: { background: nb.cover } }), img))
   thumbURL(nb.id).then(u => { if (u) img.src = u })
-  thumb.append(h('span', { class: 'kind' }, nb.type === 'canvas' ? 'Canvas' : 'Journal'))
   if (nb.fav) thumb.append(h('span', { class: 'fav' }, icon('star')))
-  const meta = [subj ? subj.name : null, nb.type === 'canvas' ? null : `${nb.pages || 1} page${(nb.pages || 1) > 1 ? 's' : ''}`, ago(nb.updated)].filter(Boolean).join(', ')
+  const meta = [subj ? subj.name : null, nb.type === 'canvas' ? 'Canvas' : `${nb.pages || 1} page${(nb.pages || 1) > 1 ? 's' : ''}`, ago(nb.updated)].filter(Boolean).join(', ')
   const el = h('div', { class: 'card' },
     h('button', { class: 'open', 'aria-label': 'Open ' + nb.title, onclick: () => nb.trashed ? trashMenu(el, nb) : openNb(nb.id) }, thumb),
     h('div', { class: 'cm' },

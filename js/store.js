@@ -271,7 +271,7 @@ export async function thumbURL(id) {
   return u
 }
 
-export function renderThumb(nb, doc, W = 240) {
+export function renderThumb(nb, doc, W = 440) {
   const c = document.createElement('canvas')
   const ctx = c.getContext('2d')
   if (nb.type === 'canvas') {

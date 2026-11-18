@@ -21,7 +21,7 @@ const P = {
   back: 'M15 6l-6 6 6 6',
   plus: 'M12 5v14M5 12h14',
   search: 'M11 4a7 7 0 1 1 0 14 7 7 0 0 1 0-14zM20 20l-4-4',
-  gear: 'M12 9a3 3 0 1 1 0 6 3 3 0 0 1 0-6zM12 2v3M12 19v3M4.9 4.9 7 7M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1',
+  gear: 'M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2zM12 9a3 3 0 1 1 0 6 3 3 0 0 1 0-6z',
   book: 'M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3zM5 17a3 3 0 0 1 3-3h11',
   inf: 'M7 9a3 3 0 1 0 0 6c3 0 7-6 10-6a3 3 0 1 1 0 6c-3 0-7-6-10-6z',
   clock: 'M12 3a9 9 0 1 1 0 18 9 9 0 0 1 0-18zM12 7v5l3 2',
@@ -184,6 +184,7 @@ export const replacePop = () => openPop && openPop.place()
 export function menu(anchor, items, opts) {
   const list = h('div', { class: 'menu' })
   for (const it of items) {
+    if (!it) continue
     if (it === '-') { list.append(h('hr')); continue }
     if (it.label && it.header) { list.append(h('div', { class: 'lbl' }, it.label)); continue }
     list.append(h('button', { class: it.danger ? 'danger' : '', onclick: () => { closePop(); it.run() } }, it.icon ? icon(it.icon) : null, h('span', {}, it.label)))
@@ -228,16 +229,22 @@ export const ago = (t) => {
   return new Date(t).toLocaleDateString()
 }
 
-/** The pen drawn as a little stick, as in the tray. */
+/** The pen as it sits in the tray: a small shaded illustration, tip up. */
+let gid = 0
 export function penSVG(pen, ink) {
-  const tip = {
-    ball: `<path d="M6 22 L13 5 L20 22 Z" fill="#a9a9a6"/><circle cx="13" cy="5" r="1.8" fill="${ink}"/>`,
-    fountain: `<path d="M7 22 L13 2 L19 22 Z" fill="#c9a24a"/><path d="M13 4 V 15" stroke="#5a4a20" stroke-width="1"/><circle cx="13" cy="15" r="1.4" fill="#5a4a20"/>`,
-    pencil: `<path d="M6 22 L13 4 L20 22 Z" fill="#e8c39a"/><path d="M10.6 10.2 L13 4 L15.4 10.2 Z" fill="${ink}"/>`,
-    calli: `<path d="M6 22 L7 9 L19 5 L20 22 Z" fill="#a9a9a6"/><path d="M7 9 L19 5" stroke="${ink}" stroke-width="3" stroke-linecap="round"/>`,
-    marker: `<path d="M5 22 L8 9 Q13 3 18 9 L21 22 Z" fill="${ink}"/>`,
-    high: `<path d="M5 22 L5 9 L21 4 L21 22 Z" fill="${ink}"/>`
-  }[pen]
-  const wide = pen === 'marker' || pen === 'high'
-  return `<svg viewBox="0 0 26 64" aria-hidden="true"><rect x="${wide ? 3 : 6}" y="22" width="${wide ? 20 : 14}" height="46" rx="3.5" fill="#d9d9d6"/><rect x="${wide ? 3 : 6}" y="30" width="${wide ? 20 : 14}" height="5" fill="${ink}"/>${tip}</svg>`
+  const id = 'pg' + (++gid)
+  // Horizontal shading that makes a flat shape read as a round barrel.
+  const barrel = (k, a, b, c) => `<linearGradient id="${id}${k}" x1="0" x2="1"><stop offset="0" stop-color="${a}"/><stop offset=".38" stop-color="${b}"/><stop offset=".72" stop-color="${a}"/><stop offset="1" stop-color="${c}"/></linearGradient>`
+  const defs = `<defs>${barrel('w', '#dcdcd7', '#fbfbf8', '#a9a9a4')}${barrel('m', '#9a9a95', '#ecece8', '#6f6f6a')}${barrel('g', '#b8913b', '#f3d98e', '#8a6a24')}${barrel('k', '#1a1a1a', '#4a4a4a', '#0b0b0b')}${barrel('y', '#e2ab2c', '#ffd567', '#b98516')}${barrel('b', '#7b4a2c', '#b77a50', '#5a341d')}</defs>`
+  const body = (x, w, fill, y = 24) => `<rect x="${x}" y="${y}" width="${w}" height="${66 - y}" rx="${w / 2.4}" fill="url(#${id}${fill})"/>`
+  const band = (x, w, y = 31) => `<rect x="${x}" y="${y}" width="${w}" height="4" fill="${ink}"/><rect x="${x}" y="${y}" width="${w}" height="1.2" fill="#fff" opacity=".35"/>`
+  const parts = {
+    ball: body(7.5, 11, 'w') + band(7.5, 11) + `<path d="M8 25 L11.6 9 Q13 6.5 14.4 9 L18 25 Z" fill="url(#${id}m)"/><circle cx="13" cy="7.2" r="1.5" fill="${ink}"/>`,
+    fountain: body(7, 12, 'k', 27) + `<rect x="7" y="34" width="12" height="2.2" fill="url(#${id}g)"/><rect x="8" y="21" width="10" height="7" rx="1.5" fill="url(#${id}k)"/><path d="M8.6 22 C 8.6 14 11.5 7 13 3 C 14.5 7 17.4 14 17.4 22 Z" fill="url(#${id}g)"/><path d="M13 6 V15.5" stroke="#5a4517" stroke-width=".9"/><circle cx="13" cy="15.8" r="1.1" fill="#5a4517"/>`,
+    pencil: `<path d="M7 26 L7 66 L19 66 L19 26 Z" fill="url(#${id}y)"/><path d="M11 26 V66 M15 26 V66" stroke="#b98516" stroke-width=".6" opacity=".7"/><path d="M7 26.5 L13 6 L19 26.5 Q16 25 13 26.5 Q10 25 7 26.5 Z" fill="#ecd0a8"/><path d="M11.2 12.2 L13 6 L14.8 12.2 Q13 11.4 11.2 12.2 Z" fill="${ink}"/>`,
+    calli: body(7.5, 11, 'b', 26) + `<rect x="8" y="21" width="10" height="6" rx="1" fill="url(#${id}m)"/><path d="M8.5 22 L9 9 L17 6 L17.5 22 Z" fill="url(#${id}m)"/><path d="M9 9 L17 6" stroke="${ink}" stroke-width="2.6" stroke-linecap="round"/>`,
+    marker: body(5.5, 15, 'w', 25) + band(5.5, 15, 33) + `<path d="M7 26 L9.5 13 Q13 8.5 16.5 13 L19 26 Z" fill="${ink}"/><path d="M10 15 Q12 11 13 11" stroke="#fff" stroke-width="1" opacity=".35" fill="none"/>`,
+    high: `<rect x="5" y="25" width="16" height="41" rx="5" fill="${ink}"/><rect x="5" y="25" width="16" height="41" rx="5" fill="url(#${id}w)" opacity=".45"/><path d="M7 26 L7 12 L19 7 L19 26 Z" fill="${ink}"/><path d="M7 12 L19 7" stroke="#fff" stroke-width=".8" opacity=".5"/>`
+  }
+  return `<svg viewBox="0 0 26 64" aria-hidden="true">${defs}${parts[pen]}</svg>`
 }

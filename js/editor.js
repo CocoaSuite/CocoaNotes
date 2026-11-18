@@ -27,6 +27,7 @@ let editing = null        // { pi, item, ta, isNew, before }
 let clip = null
 let curPage = 0
 let snap = null
+let trayCompact = false
 
 const penCfg = (p = pen) => {
   settings.pens = settings.pens || {}
@@ -56,7 +57,7 @@ const toScreen = (pi, x, y) => { const o = pageOrigin(pi); return [o[0] + x * vi
 function fit(pi = curPage) {
   if (isJ()) {
     const pad = W < 720 ? 12 : 40
-    view.s = Math.min((W - pad * 2) / size[0], nb.orient === 'h' ? (H - 120) / size[1] : 1.6)
+    view.s = Math.min((W - pad * 2) / size[0], nb.orient === 'h' ? (H - 120) / size[1] : 1.1)
     view.s = Math.max(view.s, 0.3)
     view.x = (W - size[0] * view.s) / 2
     view.y = 18 - pageTop(pi) * view.s
@@ -138,16 +139,20 @@ function render() {
   const paper = PAPERS[nb.paper] || PAPERS.white
   const skip = editing ? new Set([editing.item.id]) : null
   if (isJ()) {
-    ctx.fillStyle = '#1f1f1f'
+    ctx.fillStyle = '#1b1b1d'
     ctx.fillRect(0, 0, W, H)
     const [, vy0, , vy1] = viewRect()
     for (let i = 0; i < doc.pages.length; i++) {
       const t = pageTop(i)
       if (t + size[1] < vy0 || t > vy1) continue
       const ox = view.x, oy = view.y + t * view.s
+      // A soft paper shadow, like a sheet lifted slightly off the desk.
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-      ctx.fillStyle = 'rgba(0,0,0,.35)'
-      ctx.fillRect(ox + 2, oy + 4, size[0] * view.s, size[1] * view.s)
+      ctx.save()
+      ctx.shadowColor = 'rgba(0,0,0,.45)'; ctx.shadowBlur = 22 * dpr; ctx.shadowOffsetY = 6 * dpr
+      ctx.fillStyle = '#000'
+      ctx.fillRect(ox, oy, size[0] * view.s, size[1] * view.s)
+      ctx.restore()
       ctx.setTransform(dpr * view.s, 0, 0, dpr * view.s, dpr * ox, dpr * oy)
       const vr = viewRect()
       drawPage(ctx, nb, doc.pages[i], size, [vr[0], vr[1] - t, vr[2], vr[3] - t], view.s, skip)
@@ -882,10 +887,11 @@ function goPage(i, smooth = true) {
 }
 
 function updatePageInfo() {
-  if (!isJ()) { el.pageChip.textContent = Math.round(view.s * 100) + '%'; el.zoomLbl.textContent = Math.round(view.s * 100) + '%'; return }
+  if (!nb) return
+  if (!isJ()) { el.zoomLbl.textContent = Math.round(view.s * 100) + '%'; showChip(); return }
   const mid = (H / 2 - view.y) / view.s
   curPage = Math.max(0, Math.min(doc.pages.length - 1, Math.floor((mid + GAP / 2) / (size[1] + GAP))))
-  el.pageChip.textContent = `Page ${curPage + 1} of ${doc.pages.length}`
+  showChip()
   el.zoomLbl.textContent = Math.round(view.s * 100) + '%'
   el.pagesList.querySelectorAll('.pg').forEach((t, i) => t.classList.toggle('on', i === curPage))
   const on = el.pagesList.children[curPage]
@@ -893,10 +899,26 @@ function updatePageInfo() {
 }
 let railScrolling = false
 
+/** Page number and zoom appear while you move around, then fade so they never cover your notes. */
+let chipT = 0, chipKey = ''
+function showChip() {
+  if (!nb) return
+  const z = Math.round(view.s * 100) + '%'
+  const text = isJ() ? `Page ${curPage + 1} of ${doc.pages.length}` : z
+  const key = text + '|' + z
+  if (key === chipKey) return
+  const zoomChanged = chipKey && chipKey.split('|')[1] !== z
+  chipKey = key
+  el.pageChip.textContent = isJ() && zoomChanged ? text + '   ' + z : text
+  el.pageChip.classList.add('show')
+  clearTimeout(chipT)
+  chipT = setTimeout(() => el.pageChip.classList.remove('show'), 1300)
+}
+
 const thumbDirty = new Set()
 let thumbT = 0
 function markThumb(pi) { if (pi === undefined || !isJ()) return; thumbDirty.add(pi); clearTimeout(thumbT); thumbT = setTimeout(drawDirtyThumbs, 700) }
-function drawDirtyThumbs() { for (const i of thumbDirty) drawThumb(i); thumbDirty.clear() }
+function drawDirtyThumbs() { if (!nb) return; for (const i of thumbDirty) drawThumb(i); thumbDirty.clear() }
 function drawThumb(i) {
   const tile = el.pagesList.children[i]
   if (!tile) return
@@ -953,12 +975,24 @@ function buildTray() {
     b.innerHTML = penSVG(p, penCfg(p).c)
     pens.append(b)
   }
-  const tools = h('div', { class: 'tg tools' },
-    toolBtn('eraser', 'Eraser', 'eraser'),
-    toolBtn('lasso', 'Lasso: select, move, resize', 'lasso'),
-    toolBtn('shape', 'Shapes', 'shapes'),
-    toolBtn('text', 'Text', 'text'),
-    h('button', { class: 'ic tb', 'data-tool': 'image', 'aria-label': 'Add picture', title: 'Add picture', onclick: (e) => imagePop(e.currentTarget) }, icon('image')))
+  const compact = innerWidth <= 720
+  trayCompact = compact
+  const tools = compact
+    ? h('div', { class: 'tg tools' },
+      toolBtn('eraser', 'Eraser', 'eraser'),
+      toolBtn('lasso', 'Lasso: select, move, resize', 'lasso'),
+      h('button', { class: 'ic tb more' + (['shape', 'text'].includes(tool) ? ' on' : ''), 'aria-label': 'More tools', onclick: (e) => menu(e.currentTarget, [
+        { label: 'Shapes', icon: 'shapes', run: () => setTool('shape') },
+        { label: 'Text', icon: 'text', run: () => setTool('text') },
+        { label: 'Photos or files', icon: 'image', run: () => el.filePick.click() },
+        { label: 'Paste picture', icon: 'paste', run: () => pasteFromClipboard() }
+      ], { side: 'above' }) }, icon(tool === 'shape' ? 'shapes' : tool === 'text' ? 'text' : 'plus')))
+    : h('div', { class: 'tg tools' },
+      toolBtn('eraser', 'Eraser', 'eraser'),
+      toolBtn('lasso', 'Lasso: select, move, resize', 'lasso'),
+      toolBtn('shape', 'Shapes', 'shapes'),
+      toolBtn('text', 'Text', 'text'),
+      h('button', { class: 'ic tb', 'data-tool': 'image', 'aria-label': 'Add picture', title: 'Add picture', onclick: (e) => imagePop(e.currentTarget) }, icon('image')))
   const colors = h('div', { class: 'tg colors' })
   t.append(pens, h('i', { class: 'tsep' }), tools, h('i', { class: 'tsep' }), colors)
   fillColors()
@@ -975,7 +1009,9 @@ function fillColors() {
   const box = el.tray.querySelector('.colors')
   box.replaceChildren()
   const cur = penCfg().c
-  const list = pen === 'high' && tool === 'pen' ? HIGH_COLORS.slice(0, 4) : (settings.recent || COLORS.slice(0, 4)).slice(0, 4)
+  // On phones one swatch shows the current colour; it opens the full palette.
+  const list = trayCompact ? [] : pen === 'high' && tool === 'pen' ? HIGH_COLORS.slice(0, 4) : (settings.recent || COLORS.slice(0, 4)).slice(0, 4)
+  if (trayCompact) { box.append(h('button', { class: 'sw on cur', 'aria-label': 'Colour and size', onclick: (e) => penPop(e.currentTarget) }, h('span', { style: { background: cur } }))); return }
   for (const c of list) box.append(h('button', { class: 'sw' + (c === cur ? ' on' : ''), 'aria-label': 'Color ' + c, onclick: () => setColor(c) }, h('span', { style: { background: c } })))
   box.append(h('button', { class: 'sw more', 'aria-label': 'More colors', onclick: (e) => penPop(e.currentTarget) }, h('span')))
 }
@@ -1008,6 +1044,7 @@ export const penInk = (p) => penCfg(p).c
 
 function syncTray() {
   caseSync()
+  if (trayCompact && el.tray.querySelector('.tb.more')) { const m = el.tray.querySelector('.tb.more'); m.classList.toggle('on', ['shape', 'text'].includes(tool)); m.replaceChildren(icon(tool === 'shape' ? 'shapes' : tool === 'text' ? 'text' : 'plus')) }
   el.tray.querySelectorAll('.penB').forEach(b => {
     const on = tool === 'pen' && b.dataset.pen === pen
     b.classList.toggle('on', on)
@@ -1148,6 +1185,8 @@ async function rename() {
 // ------------------------------------------------------------- chrome positions
 
 function placeChrome() {
+  if (!nb) return
+  showChip()
   if (sel) placeSel()
   if (editing) styleTextBox()
   if (isJ()) {
@@ -1160,6 +1199,7 @@ function placeChrome() {
 
 function resize() {
   if (!nb) return
+  if ((innerWidth <= 720) !== trayCompact) buildTray()
   const r = el.surface.getBoundingClientRect()
   const oldW = W
   dpr = Math.min(window.devicePixelRatio || 1, 3)
@@ -1182,7 +1222,7 @@ export async function openEditor(id, onClose) {
   undoStack = []; redoStack = []; sel = null; editing = null; live = null; lasso = null; W = 0
   curPage = isJ() ? Math.min(nb.lastPage || 0, doc.pages.length - 1) : 0
   el.ed.classList.toggle('isCanvas', !isJ())
-  el.pageChip.hidden = !isJ()
+  chipKey = ''
   // On phones the page list is a drawer, so it starts closed.
   const railNow = !!settings.railOpen && isJ() && innerWidth > 720
   el.ed.classList.toggle('railOpen', railNow)
@@ -1347,6 +1387,15 @@ export function initEditor() {
   $('#addPage').onclick = () => addPage()
   el.addBelow.onclick = () => addPage(doc.pages.length)
   $('#exportBtn').onclick = (e) => exportMenu(e.currentTarget)
+  $('#edMore').onclick = (e) => menu(e.currentTarget, [
+    isJ() ? { label: 'Page list', icon: 'pages', run: () => toggleRail() } : null,
+    { label: 'Lining and paper', icon: 'paper', run: () => liningMenu($('#edMore')) },
+    isJ() ? { label: 'Add page', icon: 'addPage', run: () => addPage() } : null,
+    '-',
+    { label: isJ() ? 'This page as SVG' : 'Canvas as SVG', icon: 'share', run: exportPageSVG },
+    { label: isJ() ? 'Whole journal as PDF' : 'Canvas as PDF', icon: 'paper', run: printPDF },
+    { label: 'Rename', icon: 'pen', run: rename }
+  ].filter(Boolean), { side: 'below' })
   el.title.onclick = rename
   $('#edBack').onclick = async () => { const cb = el.closeCb; await closeEditor(); cb && cb() }
   $('#zIn').onclick = () => zoomBy(1.25)
