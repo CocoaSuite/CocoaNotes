@@ -122,6 +122,9 @@ function tabDrag() {
 
 // ---- taking a pen out
 
+const RM = () => matchMedia('(prefers-reduced-motion: reduce)').matches
+const deg = (d) => (d * Math.PI) / 180
+
 function pick(e, p, slot) {
   e.preventDefault()
   const r = slot.querySelector('.cPen').getBoundingClientRect()
@@ -130,74 +133,152 @@ function pick(e, p, slot) {
   el.style.width = r.width + 'px'; el.style.height = r.height + 'px'
   stage.append(el)
   slot.classList.add('empty'); slot.innerHTML = ''
-  held = { p, el, x: r.left - sr.left + r.width / 2, y: r.top - sr.top + r.height / 2, ox: e.clientX - (r.left + r.width / 2), oy: e.clientY - (r.top + r.height / 2), rot: 0, sx: e.clientX, sy: e.clientY, capped: CAPPED[p], state: 'drag' }
+  const cx = r.left - sr.left + r.width / 2, cy = r.top - sr.top + r.height / 2
+  held = { p, el, w: r.width, h: r.height, x: cx, y: cy, rot: 0, trot: 0, ox: e.clientX - sr.left - cx, oy: e.clientY - sr.top - cy, sx: e.clientX, sy: e.clientY, capped: CAPPED[p], state: 'drag', vx: 0, lx: e.clientX, lt: performance.now() }
   place()
   feedback('pick', 'light')
   el.setPointerCapture(e.pointerId)
+  loop()
   const move = (ev) => {
+    const now = performance.now()
+    held.vx = held.vx * 0.6 + ((ev.clientX - held.lx) / Math.max(1, now - held.lt)) * 0.4
+    held.lx = ev.clientX; held.lt = now
     held.x = ev.clientX - sr.left - held.ox; held.y = ev.clientY - sr.top - held.oy
-    // Leaving the case, the pen tips over to the angle you would hold it at.
-    const out = Math.max(0, Math.min(1, (panel.getBoundingClientRect().left - ev.clientX + 60) / 120))
-    held.rot = -28 * out
-    place()
+    // Leaving the case it tips over to the angle you write at, and sways a little with the motion.
+    const out = Math.max(0, Math.min(1, (panel.getBoundingClientRect().left - ev.clientX + 60) / 140))
+    held.trot = -28 * out + Math.max(-10, Math.min(10, held.vx * 6))
   }
   const up = (ev) => {
     el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up); el.removeEventListener('pointercancel', up)
     const tapped = Math.hypot(ev.clientX - held.sx, ev.clientY - held.sy) < 8
-    const inCase = ev.clientX > panel.getBoundingClientRect().left - 10 && open
-    if (tapped || inCase) { held.x = sr.width * 0.42; held.y = sr.height * 0.5; held.rot = -28 }
-    el.classList.add('settle')
-    place()
-    slide(false)
-    setTimeout(() => el.classList.remove('settle'), 380)
+    const inCase = open && ev.clientX > panel.getBoundingClientRect().left - 10
     held.state = 'placed'
-    if (held.capped) armCap()
-    else setTimeout(() => grab(), 420)
+    const to = { x: held.x, y: held.y, rot: -28 }
+    if (tapped || inCase) { to.x = sr.width * 0.45; to.y = sr.height * 0.5 }
+    slide(false)
+    glide(to, () => { if (held.capped) armCap(); else setTimeout(grab, 250) })
   }
   el.addEventListener('pointermove', move)
   el.addEventListener('pointerup', up)
   el.addEventListener('pointercancel', up)
 }
 
-function place() {
-  const { el, x, y, rot } = held
-  el.style.transform = `translate(${x - el.offsetWidth / 2}px, ${y - el.offsetHeight / 2}px) rotate(${rot}deg)`
+const tf = (x, y, rot, s = 1, w = held.w, hh = held.h) => `translate(${x - w / 2}px, ${y - hh / 2}px) rotate(${rot}deg) scale(${s})`
+function place() { held.el.style.transform = tf(held.x, held.y, held.rot) }
+
+/** While dragging, the angle follows smoothly rather than snapping. */
+function loop() {
+  if (!held || held.state !== 'drag') return
+  held.rot += (held.trot - held.rot) * 0.22
+  place()
+  requestAnimationFrame(loop)
 }
 
-/** The cap comes off with a flick or a tap. */
+/** Glide to a resting spot with a soft overshoot, like setting a pen down. */
+function glide(to, done) {
+  const { el } = held
+  const from = tf(held.x, held.y, held.rot), end = tf(to.x, to.y, to.rot)
+  Object.assign(held, to)
+  el.style.transform = end
+  if (RM()) { done(); return }
+  el.animate([{ transform: from }, { transform: end }], { duration: 420, easing: 'cubic-bezier(.2,1.25,.4,1)' }).finished.then(done, done)
+}
+
+/** The cap follows your finger. It holds on snugly for the first few millimetres, then pops free;
+ *  let go and it tumbles away. A tap pops it too. */
 function armCap() {
   const c = held.el.querySelector('.capS')
-  held.el.append(h('span', { class: 'capHint' }, 'Pop the cap off'))
-  let s = null
-  c.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); c.setPointerCapture(e.pointerId); s = { x: e.clientX, y: e.clientY } })
-  c.addEventListener('pointermove', (e) => {
-    if (!s) return
-    const d = Math.hypot(e.clientX - s.x, e.clientY - s.y)
-    c.style.transform = `translateY(${-Math.min(14, d * 0.4)}px)`
-    if (d > 26) { s = null; popCap(c) }
+  const hint = h('span', { class: 'capHint' }, 'Pull the cap off')
+  held.el.append(hint)
+  let g = null
+  const local = (dx, dy) => {
+    // Finger movement in the pen's own (rotated) frame.
+    const a = deg(-held.rot)
+    return [dx * Math.cos(a) - dy * Math.sin(a), dx * Math.sin(a) + dy * Math.cos(a)]
+  }
+  c.addEventListener('pointerdown', (e) => {
+    if (!held || !held.capped) return
+    e.preventDefault(); e.stopPropagation()
+    c.setPointerCapture(e.pointerId)
+    g = { x: e.clientX, y: e.clientY, free: false, lx: 0, ly: 0, vx: 0, vy: 0, t: performance.now(), px: e.clientX, py: e.clientY }
+    hint.remove()
   })
-  c.addEventListener('pointerup', () => { if (s) { s = null; popCap(c) } })
-  // Tapping the pen itself also pops it, for one-handed use.
-  held.el.querySelector('.bodyS').addEventListener('click', () => { if (held && held.capped) popCap(c) })
+  c.addEventListener('pointermove', (e) => {
+    if (!g) return
+    const now = performance.now(), dt = Math.max(1, now - g.t)
+    g.vx = g.vx * 0.5 + ((e.clientX - g.px) / dt) * 0.5; g.vy = g.vy * 0.5 + ((e.clientY - g.py) / dt) * 0.5
+    g.px = e.clientX; g.py = e.clientY; g.t = now
+    let [lx, ly] = local(e.clientX - g.x, e.clientY - g.y)
+    if (!g.free) {
+      // Snug fit: the cap slides along the barrel with resistance and barely sideways.
+      const pull = Math.max(0, -ly)
+      if (pull > 34) { g.free = true; feedback('cap', 'medium'); held.capped = false }
+      else { lx *= 0.15; ly = -Math.pow(pull, 0.85) * 0.55 }
+    }
+    g.lx = lx; g.ly = ly
+    c.style.transform = `translate(${lx}px, ${ly}px) rotate(${g.free ? lx * 0.15 : 0}deg)`
+  })
+  const up = () => {
+    if (!g) return
+    const was = g; g = null
+    if (!was.free) {
+      const moved = Math.hypot(was.lx, was.ly)
+      if (moved < 4) { flyCap(c, 0, -0.6, true); return }
+      // Not pulled far enough: it slides back on with a click.
+      c.animate([{ transform: c.style.transform }, { transform: 'none' }], { duration: 220, easing: 'cubic-bezier(.3,1.5,.5,1)' })
+      c.style.transform = 'none'
+      feedback('tick')
+      return
+    }
+    const [vx, vy] = local(was.vx, was.vy)
+    flyCap(c, vx, vy, false)
+  }
+  c.addEventListener('pointerup', up)
+  c.addEventListener('pointercancel', up)
 }
 
-function popCap(c) {
-  if (!held || !held.capped) return
-  held.capped = false
+function flyCap(c, vx, vy, popNow) {
+  if (popNow) { feedback('cap', 'medium'); held.capped = false }
   held.el.querySelector('.capHint')?.remove()
-  feedback('cap', 'medium')
-  c.classList.add('pop')
-  setTimeout(() => grab(), 520)
+  const from = c.style.transform || 'none'
+  const m = from.match(/translate\(([-\d.]+)px, ([-\d.]+)px\)/)
+  const x0 = m ? +m[1] : 0, y0 = m ? +m[2] : 0
+  const sp = Math.min(2.5, Math.hypot(vx, vy)), dirx = sp > 0.15 ? vx / sp : 0.35, diry = sp > 0.15 ? vy / sp : -1
+  const dist = 90 + sp * 80
+  const x1 = x0 + dirx * dist, y1 = y0 + diry * dist
+  const spin = (dirx >= 0 ? 1 : -1) * (120 + sp * 90)
+  if (RM()) { c.style.opacity = 0; setTimeout(grab, 150); return }
+  c.animate([
+    { transform: from, opacity: 1 },
+    { transform: `translate(${(x0 + x1) / 2}px, ${(y0 + y1) / 2 - 24}px) rotate(${spin / 2}deg)`, opacity: 1, offset: 0.45 },
+    { transform: `translate(${x1}px, ${y1 + 30}px) rotate(${spin}deg)`, opacity: 0 }
+  ], { duration: 560, easing: 'cubic-bezier(.25,.8,.4,1)', fill: 'forwards' })
+  setTimeout(grab, 380)
 }
 
-/** The pen is taken in hand: it lifts, shrinks toward its tip and fades. */
+/** The pen is taken in hand: it lifts for a moment, then draws into its nib and fades,
+ *  and a ring at the nib marks where your pen now writes. */
 function grab() {
-  if (!held) return
-  const { el, p } = held
+  if (!held || held.state === 'grab') return
+  held.state = 'grab'
+  const { el, p, x, y, rot, w, h: hh } = held
   play('grab'); haptic('light')
-  el.classList.add('grab')
   choosePen(p)
-  setTimeout(() => { el.remove(); held = null; fill() }, 460)
+  const a = deg(rot)
+  const tipX = x + (hh / 2) * Math.sin(a), tipY = y - (hh / 2) * Math.cos(a)
+  const k = 0.18
+  const ex = tipX + (x - tipX) * k, ey = tipY + (y - tipY) * k
+  const done = () => { el.remove(); held = null; fill() }
+  if (RM()) { done(); return }
+  el.animate([
+    { transform: tf(x, y, rot, 1, w, hh), opacity: 1, filter: 'drop-shadow(0 14px 18px rgba(0,0,0,.35))' },
+    { transform: tf(x, y - 10, rot - 4, 1.06, w, hh), opacity: 1, filter: 'drop-shadow(0 26px 26px rgba(0,0,0,.28))', offset: 0.22 },
+    { transform: tf(ex, ey, rot - 10, k, w, hh), opacity: 0, filter: 'drop-shadow(0 4px 6px rgba(0,0,0,.2))' }
+  ], { duration: 560, easing: 'cubic-bezier(.45,0,.55,1)', fill: 'forwards' }).finished.then(done, done)
+  const ring = h('div', { class: 'grabRing' })
+  ring.style.left = tipX + 'px'; ring.style.top = tipY + 'px'
+  stage.append(ring)
+  ring.animate([{ transform: 'translate(-50%,-50%) scale(2.2)', opacity: 0 }, { transform: 'translate(-50%,-50%) scale(1.2)', opacity: 1, offset: 0.55 }, { transform: 'translate(-50%,-50%) scale(.35)', opacity: 0 }], { duration: 760, easing: 'ease-out', delay: 120, fill: 'both' }).finished.then(() => ring.remove(), () => ring.remove())
 }
 
 function dropHeld() { held.el.remove(); held = null }

@@ -39,7 +39,7 @@ const penCfg = (p = pen) => {
 const isJ = () => nb && nb.type !== 'canvas'
 const pageTop = (i) => i * (size[1] + GAP)
 const totalH = () => doc.pages.length * (size[1] + GAP) - GAP
-const minS = () => (isJ() ? 0.3 : 0.05), maxS = () => (isJ() ? 10 : 30)
+const minS = () => (isJ() ? 0.15 : 0.05), maxS = () => (isJ() ? 10 : 30)
 
 function toWorld(sx, sy) { return [(sx - view.x) / view.s, (sy - view.y) / view.s] }
 /** Page index and page-local point for a screen point. */
@@ -83,6 +83,37 @@ function clampView() {
   view.y = Math.max(H * 0.45 - th, Math.min(H * 0.45, view.y))
 }
 
+/** While a finger is down the view may go past its limits, with resistance, so it never
+ *  fights the hand; on release it eases back. */
+function softClamp() {
+  const want = { ...view }
+  clampView()
+  const tx = view.x, ty = view.y
+  view.x = want.x + (tx - want.x) * 0.6
+  view.y = want.y + (ty - want.y) * 0.6
+  view.s = want.s
+}
+function settle() {
+  cancelInertia()
+  const from = { ...view }
+  // Zoom back inside the limits around the middle of the screen, then fit the position.
+  const s = Math.max(minS(), Math.min(maxS(), view.s))
+  const cx = W / 2, cy = H / 2, wx = (cx - view.x) / view.s, wy = (cy - view.y) / view.s
+  view.s = s; view.x = cx - wx * s; view.y = cy - wy * s
+  clampView()
+  const to = { ...view }
+  Object.assign(view, from)
+  if (Math.abs(to.s - from.s) < 1e-4 && Math.abs(to.x - from.x) < 0.5 && Math.abs(to.y - from.y) < 0.5) { Object.assign(view, to); updatePageInfo(); return }
+  const t0 = performance.now()
+  const step = (t) => {
+    const k = Math.min(1, (t - t0) / 280), e = 1 - Math.pow(1 - k, 3)
+    view.s = from.s + (to.s - from.s) * e; view.x = from.x + (to.x - from.x) * e; view.y = from.y + (to.y - from.y) * e
+    render(); placeChrome()
+    if (k < 1) inertia = requestAnimationFrame(step); else { inertia = 0; updatePageInfo() }
+  }
+  inertia = requestAnimationFrame(step)
+}
+
 // ------------------------------------------------------------- render
 
 export function requestRender(full = true) {
@@ -96,7 +127,7 @@ function schedule() { if (!raf) raf = requestAnimationFrame(frame) }
 function frame() {
   raf = 0
   if (!nb) return
-  if (need) { const t = performance.now(); if (snap && gesture && lastRenderMs > 18) drawSnap(); else render(); lastRenderMs = performance.now() - t; need = 0; placeChrome() }
+  if (need) { const t = performance.now(); render(); lastRenderMs = performance.now() - t; need = 0; placeChrome() }
   if (needInk) { renderInk(); needInk = false }
 }
 
@@ -131,20 +162,6 @@ function render() {
   }
 }
 
-function takeSnap() {
-  const c = snap?.c || document.createElement('canvas')
-  c.width = el.main.width; c.height = el.main.height
-  c.getContext('2d').drawImage(el.main, 0, 0)
-  snap = { c, s: view.s, x: view.x, y: view.y }
-}
-function drawSnap() {
-  const k = view.s / snap.s
-  ctx.setTransform(1, 0, 0, 1, 0, 0)
-  ctx.fillStyle = isJ() ? '#1f1f1f' : (PAPERS[nb.paper] || PAPERS.white).bg
-  ctx.fillRect(0, 0, el.main.width, el.main.height)
-  ctx.setTransform(k, 0, 0, k, (view.x - snap.x * k) * dpr, (view.y - snap.y * k) * dpr)
-  ctx.drawImage(snap.c, 0, 0)
-}
 
 /** Draws one finished item straight onto the page layer, without a full redraw. */
 function paintItem(pi, it) {
@@ -213,7 +230,7 @@ function commit(entry) {
   undoStack.push(entry)
   if (undoStack.length > 300) undoStack.shift()
   redoStack = []
-  touch(nb.id)
+  touch(nb.id, { page: doc.pages[entry.pi]?.id })
   markThumb(entry.pi)
   updateUndo()
 }
@@ -230,7 +247,7 @@ function undo() {
   if (e.kind === 'pages') { doc.pages = e.before.slice(); afterPages() }
   else applyItems(e.pi, e.after, e.before)
   redoStack.push(e)
-  clearSel(); touch(nb.id); markThumb(e.pi); requestRender(); updateUndo()
+  clearSel(); touch(nb.id, e.kind === 'pages' ? { order: true } : { page: doc.pages[e.pi]?.id }); markThumb(e.pi); requestRender(); updateUndo()
 }
 function redo() {
   finishText()
@@ -239,7 +256,7 @@ function redo() {
   if (e.kind === 'pages') { doc.pages = e.after.slice(); afterPages() }
   else applyItems(e.pi, e.before, e.after)
   undoStack.push(e)
-  clearSel(); touch(nb.id); markThumb(e.pi); requestRender(); updateUndo()
+  clearSel(); touch(nb.id, e.kind === 'pages' ? { order: true } : { page: doc.pages[e.pi]?.id }); markThumb(e.pi); requestRender(); updateUndo()
 }
 function updateUndo() {
   el.undo.disabled = !undoStack.length
@@ -342,7 +359,6 @@ function startGesture(touches) {
     resetGesture(touches)
     return
   }
-  takeSnap()
   gesture = { t0: performance.now(), max: touches.length, moved: 0, vel: [0, 0], last: null }
   resetGesture(touches)
 }
@@ -359,10 +375,13 @@ function moveGesture() {
   const mx = pts.reduce((a, q) => a + q.x, 0) / pts.length, my = pts.reduce((a, q) => a + q.y, 0) / pts.length
   let s = gesture.s0
   if (pts.length > 1 && gesture.d > 0) s = gesture.s0 * Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) / gesture.d
-  s = Math.max(minS(), Math.min(maxS(), s))
+  // Past the zoom limits the pinch resists a little instead of stopping dead.
+  const lo = minS(), hi = maxS()
+  if (s < lo) s = lo * Math.pow(s / lo, 0.25)
+  if (s > hi) s = hi * Math.pow(s / hi, 0.25)
   const wx = (gesture.mx - gesture.x0) / gesture.s0, wy = (gesture.my - gesture.y0) / gesture.s0
   view.s = s; view.x = mx - wx * s; view.y = my - wy * s
-  clampView()
+  softClamp()
   gesture.moved = Math.max(gesture.moved, Math.hypot(mx - gesture.mx, my - gesture.my), Math.abs(s - gesture.s0) * 200)
   const now = performance.now(), L = gesture.last
   if (L && now > L[2]) gesture.vel = [(mx - L[0]) / (now - L[2]), (my - L[1]) / (now - L[2])]
@@ -374,11 +393,11 @@ function endGesture(cancel) {
   if (left.length) { resetGesture(left); return }
   const g = gesture
   gesture = null
-  snap = null
   const quick = performance.now() - g.t0 < 320 && g.moved < 14
   if (!cancel && quick && settings.twoFingerUndo && g.max === 2) { undo(); toast('Undo') }
   else if (!cancel && quick && settings.twoFingerUndo && g.max === 3) { redo(); toast('Redo') }
-  else if (g.max === 1 || g.n === 1) startInertia(g.vel)
+  else if (g.max === 1 || g.n === 1) { startInertia(g.vel); return }
+  settle()
   requestRender()
   updatePageInfo()
 }
@@ -389,9 +408,9 @@ function startInertia([vx, vy]) {
     const dt = Math.min(32, t - last); last = t
     view.x += vx * dt; view.y += vy * dt
     vx *= Math.pow(0.94, dt / 16); vy *= Math.pow(0.94, dt / 16)
-    clampView(); render(); placeChrome()
+    softClamp(); render(); placeChrome()
     if (Math.hypot(vx, vy) > 0.02) inertia = requestAnimationFrame(step)
-    else { inertia = 0; updatePageInfo() }
+    else { inertia = 0; settle() }
   }
   inertia = requestAnimationFrame(step)
 }
@@ -448,7 +467,7 @@ function moveTool(sx, sy, e) {
     const dist = Math.hypot(x - lx, y - ly)
     if (dist < 0.6 / view.s) return
     // Light smoothing: steadier lines without the nib lagging behind.
-    const k = 1 - PENS[pen].smooth * 0.55
+    const k = 1 - PENS[pen].smooth * 0.3
     const nx = lx + (x - lx) * k, ny = ly + (y - ly) * k
     const f = settings.pressure === false ? 1 : sampleFactor(pen, e, dist * view.s)
     P.push(r2(nx), r2(ny), r2(f))
@@ -468,7 +487,7 @@ function moveTool(sx, sy, e) {
     const w = penCfg('ball').w * 1.2
     const lists = shapePoints(kind, ax, ay, bx, by)
     if (kind === 'arrow') lists.push(...arrowHead(ax, ay, bx, by, w))
-    shapeLive.items = lists.map(pts => ({ id: uid(), t: 's', pen: 'marker', c: shapeLive.c, w, pts }))
+    shapeLive.items = lists.map(pts => ({ id: uid(), t: 's', pen: 'marker', c: shapeLive.c, w, pts, shape: 1 }))
   } else if (a.kind === 'move') {
     const dx = x - a.lx, dy = y - a.ly
     a.lx = x; a.ly = y
@@ -767,15 +786,23 @@ async function insertImages(files, at) {
 /** Very large photos are scaled to 3200 px on the long side; everything else is kept as is. */
 async function prepImage(file) {
   const bmp = await createImageBitmap(file)
-  const w = bmp.width, hh = bmp.height, M = 3200
-  if (Math.max(w, hh) <= M) { bmp.close?.(); return { blob: file, w, h: hh } }
-  const k = M / Math.max(w, hh)
+  const w = bmp.width, hh = bmp.height, M = 2400
+  // Small enough already: keep the original bytes.
+  if (Math.max(w, hh) <= M && file.size <= 600 * 1024) { bmp.close?.(); return { blob: file, w, h: hh } }
+  const k = Math.min(1, M / Math.max(w, hh))
   const c = document.createElement('canvas')
   c.width = Math.round(w * k); c.height = Math.round(hh * k)
-  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height)
+  const g = c.getContext('2d')
+  g.drawImage(bmp, 0, 0, c.width, c.height)
   bmp.close?.()
-  const type = file.type === 'image/png' ? 'image/png' : 'image/jpeg'
-  const blob = await new Promise(r => c.toBlob(r, type, 0.9))
+  // Keep transparency only when the picture actually has some; everything else becomes a JPEG.
+  let alpha = false
+  if (file.type === 'image/png' || file.type === 'image/webp' || file.type === 'image/gif') {
+    const d = g.getImageData(0, 0, c.width, c.height).data
+    for (let i = 3; i < d.length; i += 4 * 7) if (d[i] < 250) { alpha = true; break }
+  }
+  let blob = await new Promise(r => c.toBlob(r, alpha ? 'image/png' : 'image/jpeg', 0.85))
+  if (blob.size > file.size && k === 1) blob = file
   return { blob, w: c.width, h: c.height }
 }
 
@@ -822,7 +849,7 @@ function pagesOp(fn) {
   undoStack.push({ kind: 'pages', before, after: doc.pages.slice() })
   redoStack = []
   updateUndo()
-  touch(nb.id)
+  touch(nb.id, { order: true })
   afterPages()
 }
 function addPage(at = curPage + 1) {
@@ -1146,8 +1173,10 @@ function resize() {
 // ------------------------------------------------------------- open / close
 
 export async function openEditor(id, onClose) {
-  nb = state.notebooks.get(id)
-  doc = await openDoc(id)
+  // Load first, then switch over in one step, so nothing draws a half-opened notebook.
+  const nNb = state.notebooks.get(id)
+  const nDoc = await openDoc(id)
+  nb = nNb; doc = nDoc
   size = isJ() ? pageSizeOf(nb) : null
   window.__cnOpen = id
   undoStack = []; redoStack = []; sel = null; editing = null; live = null; lasso = null; W = 0

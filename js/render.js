@@ -24,49 +24,58 @@ export function inkFor(color, paper) {
   return color
 }
 
-/** Lines of the paper inside the visible rectangle [x0,y0,x1,y1] of a page (or of an endless canvas). */
+const hexRGB = (h) => { const n = parseInt(h.slice(1), 16); return [n >> 16, (n >> 8) & 255, n & 255] }
+const mix = (a, b, t) => { const A = hexRGB(a), B = hexRGB(b); return `rgb(${A.map((v, i) => Math.round(v + (B[i] - v) * t)).join(',')})` }
+
+/** Lines of the paper inside the visible rectangle [x0,y0,x1,y1] of a page (or of an endless canvas).
+ *  The lining is part of the paper: its spacing and line weight scale with zoom exactly like the ink,
+ *  as if zooming into a photo of the page. When it gets too fine to see it blends into an even tint,
+ *  the way a photo looks from far away, instead of flickering or jumping to another grid size. */
 export function drawLining(ctx, lining, paper, rect, scale, page) {
   const P = PAPERS[paper] || PAPERS.white
-  let [x0, y0, x1, y1] = rect
-  const hair = 1 / scale
-  ctx.lineWidth = hair
-  const infinite = !page
-  let step = { ruled: 33, college: 27, grid: 19, dotted: 19, cornell: 27 }[lining]
-  if (!step) return
-  // On an endless canvas, zoomed far out, the grid steps up so it stays readable.
-  if (infinite) while (step * scale < 9) step *= 5
-  else if (step * scale < 3) return
+  const [x0, y0, x1, y1] = rect
+  const step = { ruled: 33, college: 27, grid: 19, dotted: 19, cornell: 27 }[lining]
+  if (!step || x1 <= x0 || y1 <= y0) return
+  const LW = 1, DR = 1.25
   const top = page && (lining === 'ruled' || lining === 'college' || lining === 'cornell') ? 96 : 0
-  const bottom = page ? page[1] : Infinity
-  if (lining === 'dotted') {
+  const yEnd = page ? (lining === 'cornell' ? page[1] - 190 : page[1]) : Infinity
+  const onScreen = step * scale
+  if (onScreen < (lining === 'dotted' ? 6 : 3.5)) {
+    // Too fine to draw line by line: the even tint the lines average out to.
+    let cover = lining === 'dotted' ? (Math.PI * DR * DR) / (step * step) : LW / step
+    if (lining === 'grid') cover = 1 - (1 - cover) * (1 - cover)
+    ctx.fillStyle = mix(P.bg, lining === 'dotted' ? P.dt : P.ln, Math.min(1, cover * 1.1))
+    const fy0 = Math.max(y0, top), fy1 = Math.min(y1, yEnd)
+    if (fy1 > fy0) ctx.fillRect(x0, fy0, x1 - x0, fy1 - fy0)
+  } else if (lining === 'dotted') {
     ctx.fillStyle = P.dt
-    const r = Math.max(0.9, 1.1 / Math.max(scale, 0.6)) * (infinite ? 1 : 1)
-    const sx = Math.floor(x0 / step) * step, sy = Math.floor(y0 / step) * step
-    const count = ((x1 - sx) / step) * ((y1 - sy) / step)
-    if (count > 60000) return
+    const sx = Math.ceil(x0 / step) * step, sy = Math.ceil(y0 / step) * step
     ctx.beginPath()
-    for (let y = sy; y <= y1; y += step) for (let x = sx; x <= x1; x += step) { if (page && (x <= 0 || y <= 0 || x >= page[0] || y >= page[1])) continue; ctx.rect(x - r, y - r, 2 * r, 2 * r) }
+    for (let y = sy; y <= y1; y += step) {
+      if (page && (y <= 0 || y >= page[1])) continue
+      for (let x = sx; x <= x1; x += step) {
+        if (page && (x <= 0 || x >= page[0])) continue
+        // Round when big enough to see the shape; tiny dots are drawn as squares, which look the same and are much faster.
+        if (onScreen >= 24) { ctx.moveTo(x + DR, y); ctx.arc(x, y, DR, 0, Math.PI * 2) } else ctx.rect(x - DR * 0.9, y - DR * 0.9, DR * 1.8, DR * 1.8)
+      }
+    }
     ctx.fill()
-    return
+  } else {
+    ctx.strokeStyle = P.ln
+    ctx.lineWidth = LW
+    ctx.beginPath()
+    if (lining === 'grid') for (let x = Math.ceil(x0 / step) * step; x <= x1; x += step) { if (page && (x <= 0 || x >= page[0])) continue; ctx.moveTo(x, y0); ctx.lineTo(x, y1) }
+    for (let y = top + Math.ceil((Math.max(y0, top) - top) / step) * step; y <= y1; y += step) {
+      if (page && (y <= 0 || y >= yEnd)) continue
+      ctx.moveTo(x0, y); ctx.lineTo(x1, y)
+    }
+    ctx.stroke()
   }
-  ctx.strokeStyle = P.ln
-  ctx.beginPath()
-  if (lining === 'grid') {
-    for (let x = Math.ceil(x0 / step) * step; x <= x1; x += step) { if (page && (x <= 0 || x >= page[0])) continue; ctx.moveTo(x, y0); ctx.lineTo(x, y1) }
-  }
-  const origin = page && top > 0 ? top : 0
-  const firstY = origin + Math.max(page && top > 0 ? 0 : -Infinity, Math.ceil((y0 - origin) / step)) * step
-  for (let y = firstY; y <= y1; y += step) {
-    if (page && (y <= 0 || y >= bottom)) continue
-    if (lining === 'cornell' && page && y > page[1] - 190) continue
-    ctx.moveTo(x0, y); ctx.lineTo(x1, y)
-  }
-  ctx.stroke()
   if (page && (lining === 'college' || lining === 'cornell' || lining === 'ruled')) {
     ctx.strokeStyle = P.mg
-    ctx.lineWidth = Math.max(hair, 1.2)
+    ctx.lineWidth = 1.4
     ctx.beginPath()
-    if (lining === 'college' || lining === 'ruled') { ctx.moveTo(lining === 'college' ? 96 : 72, y0); ctx.lineTo(lining === 'college' ? 96 : 72, y1) }
+    if (lining === 'college' || lining === 'ruled') { const mx = lining === 'college' ? 96 : 72; ctx.moveTo(mx, y0); ctx.lineTo(mx, y1) }
     if (lining === 'cornell') {
       ctx.moveTo(228, Math.max(y0, 96)); ctx.lineTo(228, Math.min(y1, page[1] - 190))
       ctx.moveTo(x0, page[1] - 190); ctx.lineTo(x1, page[1] - 190)
@@ -212,6 +221,8 @@ function svgCtx() {
     beginPath() { segs = [] },
     moveTo(x, y) { segs.push(`M${+x.toFixed(2)} ${+y.toFixed(2)}`) },
     lineTo(x, y) { segs.push(`L${+x.toFixed(2)} ${+y.toFixed(2)}`) },
+    arc(x, y, r) { segs.push(`M${+(x - r).toFixed(2)} ${+y.toFixed(2)}a${r} ${r} 0 1 0 ${2 * r} 0a${r} ${r} 0 1 0 ${-2 * r} 0Z`) },
+    fillRect(x, y, w, h) { out.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${o.fillStyle}"/>`) },
     rect(x, y, w, h) { segs.push(`M${+x.toFixed(2)} ${+y.toFixed(2)}h${+w.toFixed(2)}v${+h.toFixed(2)}h${-w.toFixed(2)}Z`) },
     stroke() { out.push(`<path d="${segs.join('')}" fill="none" stroke="${o.strokeStyle}" stroke-width="${o.lineWidth}"/>`) },
     fill() { out.push(`<path d="${segs.join('')}" fill="${o.fillStyle}"/>`) },

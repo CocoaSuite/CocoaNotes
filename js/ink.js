@@ -87,25 +87,63 @@ export function path2d(item) {
 
 const dot = (x, y, r) => `M${r2(x - r)} ${r2(y)}a${r2(r)} ${r2(r)} 0 1 0 ${r2(2 * r)} 0a${r2(r)} ${r2(r)} 0 1 0 ${r2(-2 * r)} 0Z`
 
+/** Turns the captured points into a smooth, evenly spaced line: a light relaxation removes hand
+ *  and sensor jitter, then a centripetal Catmull-Rom spline fills in curves between samples, so
+ *  fast strokes come out round instead of as straight segments. */
+export function smoothPts(item) {
+  const P = item.pts, n = P.length / 3
+  if (n < 3 || item.shape) return P
+  let X = new Float64Array(n), Y = new Float64Array(n), F = new Float64Array(n)
+  for (let i = 0; i < n; i++) { X[i] = P[i * 3]; Y[i] = P[i * 3 + 1]; F[i] = P[i * 3 + 2] }
+  for (let pass = 0; pass < 2; pass++) {
+    const nx = X.slice(), ny = Y.slice()
+    for (let i = 1; i < n - 1; i++) { nx[i] = X[i] * 0.5 + (X[i - 1] + X[i + 1]) * 0.25; ny[i] = Y[i] * 0.5 + (Y[i - 1] + Y[i + 1]) * 0.25 }
+    X = nx; Y = ny
+  }
+  const out = []
+  const pt = (i) => { const j = Math.max(0, Math.min(n - 1, i)); return [X[j], Y[j]] }
+  for (let i = 0; i < n - 1; i++) {
+    const p0 = pt(i - 1), p1 = pt(i), p2 = pt(i + 1), p3 = pt(i + 2)
+    const d = Math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+    const steps = Math.max(1, Math.min(24, Math.ceil(d / 1.2)))
+    // centripetal parametrisation: no loops or overshoot on sharp turns
+    const t01 = Math.pow(Math.hypot(p1[0] - p0[0], p1[1] - p0[1]), 0.5) || 1e-4
+    const t12 = Math.pow(d, 0.5) || 1e-4
+    const t23 = Math.pow(Math.hypot(p3[0] - p2[0], p3[1] - p2[1]), 0.5) || 1e-4
+    const m1 = [], m2 = []
+    for (let k = 0; k < 2; k++) {
+      m1[k] = (p2[k] - p1[k] + t12 * ((p1[k] - p0[k]) / t01 - (p2[k] - p0[k]) / (t01 + t12)))
+      m2[k] = (p2[k] - p1[k] + t12 * ((p3[k] - p2[k]) / t23 - (p3[k] - p1[k]) / (t12 + t23)))
+    }
+    for (let s = 0; s < steps; s++) {
+      const t = s / steps, t2 = t * t, t3 = t2 * t
+      const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2
+      out.push(h00 * p1[0] + h10 * m1[0] + h01 * p2[0] + h11 * m2[0], h00 * p1[1] + h10 * m1[1] + h01 * p2[1] + h11 * m2[1], F[i] + (F[i + 1] - F[i]) * t)
+    }
+  }
+  out.push(X[n - 1], Y[n - 1], F[n - 1])
+  return out
+}
+
 /** Variable-width ribbon with round ends. */
 function ribbonPath(item) {
-  const P = item.pts, n = P.length / 3, base = item.w
+  const P = smoothPts(item), n = P.length / 3, base = item.w
   const flat = item.pen === 'high'
   // Smooth the width factors so pressure jitter does not show.
   const W = new Array(n)
   for (let i = 0; i < n; i++) {
     let s = 0, c = 0
-    for (let k = -2; k <= 2; k++) { const j = i + k; if (j >= 0 && j < n) { s += P[j * 3 + 2]; c++ } }
+    for (let k = -6; k <= 6; k++) { const j = i + k; if (j >= 0 && j < n) { s += P[j * 3 + 2]; c++ } }
     W[i] = Math.max(0.35, (s / c) * base) / 2
   }
   // Fountain strokes taper in and out.
   if (item.pen === 'fountain') {
-    const T = Math.min(5, Math.floor(n / 3))
+    const T = Math.min(14, Math.floor(n / 3))
     for (let i = 0; i < T; i++) { const f = 0.45 + 0.55 * (i / T); W[i] *= f; W[n - 1 - i] *= f }
   }
   const L = [], R = []
   for (let i = 0; i < n; i++) {
-    const a = Math.max(0, i - 1), b = Math.min(n - 1, i + 1)
+    const a = Math.max(0, i - 2), b = Math.min(n - 1, i + 2)
     let dx = P[b * 3] - P[a * 3], dy = P[b * 3 + 1] - P[a * 3 + 1]
     const len = Math.hypot(dx, dy) || 1
     dx /= len; dy /= len
@@ -138,7 +176,7 @@ function curve(pts) {
 /** Broad-nib calligraphy: the nib is a flat edge held at a fixed angle, so the line is thick
  *  across the nib and thin along it. Built from consistently wound quads, filled nonzero. */
 function nibPath(item) {
-  const P = item.pts, n = P.length / 3
+  const P = smoothPts(item), n = P.length / 3
   const ang = ((item.nib ?? 40) * Math.PI) / 180
   const vx = Math.cos(ang), vy = -Math.sin(ang)
   const hair = Math.max(0.5, item.w * 0.09)

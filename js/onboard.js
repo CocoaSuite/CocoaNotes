@@ -1,6 +1,6 @@
 // The CocoaSuite Hello: "hello" is written in one stroke over the blurred app with the hello sound,
 // then a few cards set CocoaNotes up the way you write. Same lettering as CocoaShot and CocoaCanvas.
-import { h } from './ui.js'
+import { h, enter } from './ui.js'
 import { settings, saveSettings } from './store.js'
 import { PROVIDERS } from './sync.js'
 import { feedback, unlock } from './fx.js'
@@ -45,7 +45,8 @@ export function hello({ force = false, onDone } = {}) {
   const len = P.getTotalLength()
   P.style.strokeDasharray = String(len)
   P.style.strokeDashoffset = String(RM() ? 0 : len)
-  requestAnimationFrame(() => requestAnimationFrame(() => O.classList.add('on')))
+  // Blurred from the first frame; only its opacity fades in, so the app never flashes through.
+  if (!RM()) O.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 650, easing: 'ease-out' })
   let phase = -1, i = 0
   const write = (snd) => {
     if (phase !== -1) return
@@ -88,23 +89,24 @@ export function hello({ force = false, onDone } = {}) {
       C.querySelector('.onbNx').textContent = n === STEPS.length - 1 ? 'Start writing' : 'Next'
     }
     if (dir === 0 || RM()) { fill(); i = n; return }
-    SS.style.setProperty('--sx', (dir > 0 ? -18 : 18) + 'px')
-    SS.classList.add('sw')
-    setTimeout(() => { fill(); SS.style.setProperty('--sx', (dir > 0 ? 18 : -18) + 'px'); SS.style.transition = 'none'; void SS.offsetWidth; SS.style.transition = ''; SS.classList.remove('sw') }, 200)
     i = n
+    SS.getAnimations().forEach(a => a.cancel())
+    SS.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: `translateX(${dir > 0 ? -18 : 18}px)` }], { duration: 150, easing: 'ease-in', fill: 'forwards' }).finished.then(() => {
+      fill()
+      SS.getAnimations().forEach(a => a.cancel())
+      enter(SS, { opacity: 0, transform: `translateX(${dir > 0 ? 18 : -18}px)` }, 240)
+    }, () => { })
   }
   const toCard = async () => {
     if (phase === 1 || phase === 2) return
     if (phase === -1) write(true)
     phase = 1
     unlock()
-    H.classList.add('out')
-    await wait(380)
+    if (!RM()) await H.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-18px) scale(.97)' }], { duration: 380, easing: 'cubic-bezier(.4,0,.2,1)', fill: 'forwards' }).finished
     H.remove()
-    C.hidden = false
     show(0, 0)
-    void C.offsetWidth
-    C.classList.add('in')
+    C.hidden = false
+    enter(C, { opacity: 0, transform: 'translateY(28px) scale(.98)' }, 550)
     setTimeout(() => C.querySelector('.onbNx').focus(), 300)
   }
   const finish = async () => {
@@ -112,10 +114,11 @@ export function hello({ force = false, onDone } = {}) {
     phase = 2
     settings.ux = choice.ux; settings.tray = choice.tray; settings.penOnly = choice.penOnly; settings.onboarded = true
     saveSettings()
-    C.classList.remove('in'); C.classList.add('out')
-    await wait(300)
     O.classList.add('clear')
-    await wait(900)
+    if (!RM()) {
+      await C.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(18px) scale(.98)' }], { duration: 280, easing: 'ease-in', fill: 'forwards' }).finished
+      await O.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 700, easing: 'ease-in-out', fill: 'forwards' }).finished
+    }
     O.remove()
     running = false
     onDone && onDone()

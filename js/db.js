@@ -1,7 +1,7 @@
 // Local storage for CocoaNotes. Everything is written to IndexedDB on this device first;
 // the cloud only ever gets copies. Nothing here deletes data unless the person asks for it.
 
-const NAME = 'cocoanotes', VER = 1
+const NAME = 'cocoanotes', VER = 2
 let dbp = null
 
 function open() {
@@ -15,6 +15,9 @@ function open() {
       if (!d.objectStoreNames.contains('blobs')) d.createObjectStore('blobs', { keyPath: 'id' })
       if (!d.objectStoreNames.contains('outbox')) d.createObjectStore('outbox', { keyPath: 'key' })
       if (!d.objectStoreNames.contains('meta')) d.createObjectStore('meta', { keyPath: 'key' })
+      // v2: each page stored on its own, so a save writes only the page that changed.
+      if (!d.objectStoreNames.contains('pages')) d.createObjectStore('pages', { keyPath: 'k' }).createIndex('nb', 'nb')
+      if (!d.objectStoreNames.contains('thumbs')) d.createObjectStore('thumbs', { keyPath: 'id' })
     }
     r.onsuccess = () => {
       const d = r.result
@@ -47,6 +50,8 @@ export const db = {
   put: (store, val) => tx([store], 'readwrite', t => { t.objectStore(store).put(val) }),
   del: (store, key) => tx([store], 'readwrite', t => { t.objectStore(store).delete(key) }),
   /** Several writes in one transaction, so a notebook and its pages are saved together or not at all. */
+  byIndex: (store, index, key) => tx([store], 'readonly', t => wrap(t.objectStore(store).index(index).getAll(key))),
+  keysByIndex: (store, index, key) => tx([store], 'readonly', t => wrap(t.objectStore(store).index(index).getAllKeys(key))),
   multi: (ops) => {
     const stores = [...new Set(ops.map(o => o[1]))]
     return tx(stores, 'readwrite', t => { for (const [op, s, v] of ops) op === 'put' ? t.objectStore(s).put(v) : t.objectStore(s).delete(v) })

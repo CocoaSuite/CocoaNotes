@@ -89,32 +89,66 @@ export function toast(msg, action) {
   toastT = setTimeout(() => t.classList.remove('on'), action ? 7000 : 2800)
 }
 
+const RM = () => matchMedia('(prefers-reduced-motion: reduce)').matches
+/** Plays an entrance with the Web Animations API. The element is drawn in its final place from the
+ *  very first frame (no class toggling a frame later), which is what stops the flicker on iPad. */
+export function enter(el, from, ms = 220) {
+  if (RM()) return
+  el.animate([from, { opacity: 1, transform: 'none' }], { duration: ms, easing: 'cubic-bezier(.22,.8,.24,1)' })
+}
+
 /** A dialog: centred on wide screens, a bottom sheet with a grab bar on phones (as in CocoaCanvas). */
 export function sheet(title, body, { wide = false, onClose } = {}) {
   const m = $('#modal')
   const box = h('div', { class: 'box' + (wide ? ' wide' : ''), role: 'dialog', 'aria-modal': 'true', 'aria-label': title })
-  const close = () => { m.classList.remove('on'); setTimeout(() => { if (!m.classList.contains('on')) { m.hidden = true; m.replaceChildren() } }, 220); document.removeEventListener('keydown', esc); onClose && onClose() }
+  let closed = false
+  const close = () => {
+    if (closed) return
+    closed = true
+    document.removeEventListener('keydown', esc)
+    const phone = innerWidth <= 720
+    const done = () => { if (m.firstChild === box) { m.hidden = true; m.replaceChildren() } }
+    if (RM()) done()
+    else {
+      box.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: phone ? 'translateY(60px)' : 'translateY(10px) scale(.98)' }], { duration: 170, easing: 'ease-in', fill: 'forwards' })
+      m.animate([{ backgroundColor: 'rgba(0,0,0,.55)' }, { backgroundColor: 'rgba(0,0,0,0)' }], { duration: 170, fill: 'forwards' }).finished.then(done, done)
+    }
+    onClose && onClose()
+  }
   const esc = (e) => { if (e.key === 'Escape') close() }
   box.append(h('div', { class: 'grab' }), h('div', { class: 'mh' }, h('h2', {}, title), iconBtn('close', 'Close', close)), body)
+  const wasOpen = !m.hidden && m.firstChild
+  m.getAnimations().forEach(a => a.cancel())
   m.replaceChildren(box)
   m.hidden = false
   m.onpointerdown = (e) => { if (e.target === m) close() }
-  requestAnimationFrame(() => m.classList.add('on'))
+  if (!wasOpen && !RM()) m.animate([{ backgroundColor: 'rgba(0,0,0,0)' }, { backgroundColor: 'rgba(0,0,0,.55)' }], { duration: 200 })
+  enter(box, { opacity: 0, transform: innerWidth <= 720 ? 'translateY(70px)' : 'translateY(14px) scale(.98)' }, 260)
   document.addEventListener('keydown', esc)
   return { close, box }
 }
 
-/** A small menu or panel anchored to a button. */
+/** A small menu or panel anchored to a button. Opening it again for the same button (or after the
+ *  button was redrawn) updates it in place instead of closing and reopening it. */
 let openPop = null
 export function popover(anchor, content, { side = 'auto', cls = '' } = {}) {
+  if (openPop && (openPop.anchor === anchor || !openPop.anchor.isConnected)) {
+    openPop.pop.replaceChildren(content)
+    openPop.pop.className = 'pop ' + cls
+    openPop.anchor = anchor
+    openPop.side = side
+    openPop.place()
+    return openPop.pop
+  }
   closePop()
   const pop = h('div', { class: 'pop ' + cls, role: 'dialog' }, content)
   document.body.append(pop)
-  const place = () => {
-    const a = anchor.getBoundingClientRect(), pw = pop.offsetWidth, ph = pop.offsetHeight, M = 8
+  const st = { pop, anchor, side }
+  st.place = () => {
+    const a = st.anchor.getBoundingClientRect(), pw = pop.offsetWidth, ph = pop.offsetHeight, M = 8
     let x, y
     const room = { below: innerHeight - a.bottom, above: a.top, right: innerWidth - a.right, left: a.left }
-    let s = side
+    let s = st.side
     if (s === 'auto') s = room.below > ph + 16 ? 'below' : room.above > ph + 16 ? 'above' : room.right > pw + 16 ? 'right' : 'left'
     if (s === 'below') { x = a.left + a.width / 2 - pw / 2; y = a.bottom + 8 }
     else if (s === 'above') { x = a.left + a.width / 2 - pw / 2; y = a.top - ph - 10 }
@@ -122,22 +156,27 @@ export function popover(anchor, content, { side = 'auto', cls = '' } = {}) {
     else { x = a.left - pw - 10; y = a.top + a.height / 2 - ph / 2 }
     pop.style.left = Math.max(M, Math.min(innerWidth - pw - M, x)) + 'px'
     pop.style.top = Math.max(M + (window.visualViewport?.offsetTop || 0), Math.min(innerHeight - ph - M, y)) + 'px'
+    st.s = s
   }
-  place()
-  requestAnimationFrame(() => pop.classList.add('on'))
-  const away = (e) => { if (!pop.contains(e.target) && !anchor.contains(e.target)) closePop() }
-  setTimeout(() => document.addEventListener('pointerdown', away, true), 0)
-  const esc = (e) => { if (e.key === 'Escape') closePop() }
-  document.addEventListener('keydown', esc)
-  openPop = { pop, anchor, away, esc, place }
+  st.place()
+  const o = { below: 'translateY(-6px)', above: 'translateY(6px)', right: 'translateX(-6px)', left: 'translateX(6px)' }[st.s] || 'none'
+  enter(pop, { opacity: 0, transform: o + ' scale(.97)' }, 160)
+  st.away = (e) => { if (!pop.contains(e.target) && !st.anchor.contains(e.target)) closePop() }
+  setTimeout(() => document.addEventListener('pointerdown', st.away, true), 0)
+  st.esc = (e) => { if (e.key === 'Escape') closePop() }
+  document.addEventListener('keydown', st.esc)
+  openPop = st
   return pop
 }
 export function closePop() {
   if (!openPop) return
-  document.removeEventListener('pointerdown', openPop.away, true)
-  document.removeEventListener('keydown', openPop.esc)
-  openPop.pop.remove()
+  const { pop, away, esc } = openPop
+  document.removeEventListener('pointerdown', away, true)
+  document.removeEventListener('keydown', esc)
   openPop = null
+  if (RM()) { pop.remove(); return }
+  pop.style.pointerEvents = 'none'
+  pop.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 110, fill: 'forwards' }).finished.then(() => pop.remove(), () => pop.remove())
 }
 export const popOpenFor = (a) => openPop && openPop.anchor === a
 export const replacePop = () => openPop && openPop.place()

@@ -1,6 +1,6 @@
 // The library: subjects, notebooks and the new-notebook sheet.
 import { h, $, icon, iconBtn, sheet, menu, confirmSheet, promptSheet, toast, ago, popover, closePop } from './ui.js'
-import { state, settings, saveSettings, createNotebook, updateNotebook, deleteForever, duplicateNotebook, saveSubjects, SUBJECT_COLORS, on as onStore } from './store.js'
+import { state, settings, saveSettings, createNotebook, updateNotebook, deleteForever, duplicateNotebook, saveSubjects, SUBJECT_COLORS, on as onStore, thumbURL } from './store.js'
 import { PAPERS, LININGS_J, LININGS_C, drawLining } from './render.js'
 import { enqueueDelete } from './sync.js'
 import { syncChip } from './status.js'
@@ -18,7 +18,10 @@ export function initLibrary(opts) {
   $('#libMenu').onclick = () => $('#lib').classList.toggle('sideOpen')
   $('#sideScrim').onclick = () => $('#lib').classList.remove('sideOpen')
   syncChip($('#syncChipL'))
-  onStore((ev) => { if (ev === 'notebooks' || ev === 'thumb' || ev === 'subjects') renderAll() })
+  onStore((ev, id) => {
+    if (ev === 'thumb') { refreshThumb(id); return }
+    if (ev === 'notebooks' || ev === 'subjects') renderAll()
+  })
   renderAll()
 }
 
@@ -112,7 +115,7 @@ function renderGrid() {
   const sortB = h('button', { class: 'sortB', onclick: (e) => menu(e.currentTarget, [['updated', 'Last edited'], ['created', 'Date created'], ['name', 'Name']].map(([id, label]) => ({ label: (view.sort === id ? '✓ ' : '') + label, run: () => { view.sort = id; renderGrid() } }))) }, { updated: 'Last edited', created: 'Date created', name: 'Name' }[view.sort], icon('down'))
   const head = h('div', { class: 'gh' }, h('h1', {}, placeTitle()), h('span', { class: 'sp' }), seg, sortB)
   const cards = h('div', { class: 'cards' })
-  for (const nb of list) cards.append(card(nb))
+  for (const nb of list) cards.append(cardFor(nb))
   main.replaceChildren(head)
   if (view.place === 'trash' && list.length) main.append(h('p', { class: 'mute' }, 'Notebooks in the trash stay on this device until you delete them forever.'))
   if (!list.length) main.append(empty())
@@ -128,16 +131,38 @@ function empty() {
     h('button', { class: 'pri', onclick: () => newSheet(view.place.startsWith('s:') ? view.place.slice(2) : null) }, icon('plus'), 'New notebook'))
 }
 
+// Cards are kept and reused while nothing on them changed, so the library never rebuilds
+// pictures it already shows (no flashing when menus act or notes save).
+const cardCache = new Map()
+function cardFor(nb) {
+  const subj = state.subjects.find(s => s.id === nb.subject)
+  const key = [nb.title, nb.type, nb.orient, nb.paper, nb.cover, nb.pages, nb.fav, nb.trashed, subj?.name, subj?.color, Math.floor((Date.now() - nb.updated) / 60000)].join('|')
+  const c = cardCache.get(nb.id)
+  if (c && c.key === key) return c.el
+  const el = card(nb)
+  cardCache.set(nb.id, { key, el })
+  return el
+}
+async function refreshThumb(id) {
+  const c = cardCache.get(id)
+  if (!c) return
+  const u = await thumbURL(id)
+  const img = c.el.querySelector('.thumb img')
+  if (u && img && img.src !== u) {
+    // Swap without a blank frame: load the new picture first.
+    const pre = new Image(); pre.onload = () => { img.src = u }; pre.src = u
+  }
+}
+
 function card(nb) {
   const subj = state.subjects.find(s => s.id === nb.subject)
   const thumb = h('div', { class: 'thumb ' + (nb.type === 'canvas' ? 'cv' : nb.orient === 'h' ? 'jh' : 'jv') })
-  if (nb.thumb) {
-    const img = h('img', { src: nb.thumb, alt: '' })
-    thumb.append(nb.type === 'canvas' ? img : h('div', { class: 'pgm' }, h('i', { class: 'spine', style: { background: nb.cover } }), img))
-  } else {
-    const P = PAPERS[nb.paper] || PAPERS.white
-    thumb.append(h('div', { class: nb.type === 'canvas' ? 'pgc' : 'pgm', style: { background: P.bg } }, nb.type !== 'canvas' ? h('i', { class: 'spine', style: { background: nb.cover } }) : null))
-  }
+  // Paper colour shows at once; the preview image fades in over it when ready, no flash.
+  const P = PAPERS[nb.paper] || PAPERS.white
+  const img = h('img', { alt: '', decoding: 'async' })
+  img.onload = () => img.classList.add('in')
+  thumb.append(nb.type === 'canvas' ? h('div', { class: 'pgc', style: { background: P.bg } }, img) : h('div', { class: 'pgm', style: { background: P.bg } }, h('i', { class: 'spine', style: { background: nb.cover } }), img))
+  thumbURL(nb.id).then(u => { if (u) img.src = u })
   thumb.append(h('span', { class: 'kind' }, nb.type === 'canvas' ? 'Canvas' : 'Journal'))
   if (nb.fav) thumb.append(h('span', { class: 'fav' }, icon('star')))
   const meta = [subj ? subj.name : null, nb.type === 'canvas' ? null : `${nb.pages || 1} page${(nb.pages || 1) > 1 ? 's' : ''}`, ago(nb.updated)].filter(Boolean).join(', ')

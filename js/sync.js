@@ -2,7 +2,8 @@
 // Every upload waits in an outbox kept in IndexedDB, so it survives closing the app, going offline
 // or a failed request; it is retried automatically with growing pauses until it succeeds.
 import { db, clean } from './db.js'
-import { state, settings, saveSettings, on as onStore, openDoc, importNotebook, blobIds } from './store.js'
+import { state, settings, saveSettings, on as onStore, openDoc, importNotebook, blobIds, loadDoc } from './store.js'
+import { itemsToJSON, itemsFromJSON, unpackItems } from './codec.js'
 import { CONFIG } from './config.js'
 
 const L = new Set()
@@ -228,7 +229,7 @@ async function enqueue(pid, kind, ref) {
 export async function enqueueNotebook(id) {
   const provs = connected()
   if (!provs.length) return
-  const doc = state.docs.get(id) || await db.get('docs', id)
+  const doc = state.docs.get(id) || (await loadDoc(id)).doc
   for (const p of provs) {
     if (doc) {
       const up = await uploadedSet(p.id)
@@ -322,9 +323,11 @@ async function send(p, e) {
     // Upload exactly what is saved on this device.
     const nb = await db.get('notebooks', e.ref)
     if (!nb) return
-    const doc = await db.get('docs', e.ref)
+    const { doc } = await loadDoc(e.ref)
     const meta = clean(nb); delete meta.thumb; delete meta.base
-    const file = new Blob([JSON.stringify({ app: 'CocoaNotes', v: 1, nb: meta, doc })], { type: 'application/json' })
+    // Compact: stroke points travel as base64 binary, the same format kept on the device.
+    const pages = (doc ? doc.pages : []).map(p => ({ id: p.id, items: itemsToJSON(p.items) }))
+    const file = new Blob([JSON.stringify({ app: 'CocoaNotes', v: 2, nb: meta, pages })], { type: 'application/json' })
     await p.put(nbName(nb.id), file, { kind: 'nb', nbId: nb.id, updated: String(nb.updated) })
     // Record what this service now has, without touching anything written meanwhile.
     const live = state.notebooks.get(nb.id)
@@ -364,6 +367,7 @@ export async function pull() {
         let data
         try { data = JSON.parse(await blob.text()) } catch { continue }
         if (data.app !== 'CocoaNotes') continue
+        data.doc = data.v === 2 ? { id, pages: data.pages.map(p => ({ id: p.id, items: itemsFromJSON(p.items) })) } : { id, pages: data.doc.pages.map(p => ({ id: p.id, items: unpackItems(p.items) })) }
         // Pictures this device does not have yet.
         for (const b of blobIds(data.doc)) {
           if (await db.get('blobs', b)) continue
@@ -377,7 +381,7 @@ export async function pull() {
           await importNotebook(nb, { ...data.doc, id: copyId })
           await enqueueNotebook(copyId)
         } else {
-          const nb = { ...data.nb, base: { ...(local?.base || {}), [p.id]: data.nb.updated }, thumb: local?.thumb }
+          const nb = { ...data.nb, base: { ...(local?.base || {}), [p.id]: data.nb.updated } }
           state.docs.delete(id)
           await importNotebook(nb, data.doc)
         }

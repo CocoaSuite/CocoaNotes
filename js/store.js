@@ -3,6 +3,7 @@
 import { db, uid, clean } from './db.js'
 import { A4, drawPage, PAPERS, drawLining, drawItems } from './render.js'
 import { bbox } from './ink.js'
+import { packItems, unpackItems, itemsToJSON, itemsFromJSON, packedSize } from './codec.js'
 
 const listeners = new Set()
 export const on = (fn) => (listeners.add(fn), () => listeners.delete(fn))
@@ -30,7 +31,7 @@ export const state = { notebooks: new Map(), subjects: [], docs: new Map(), savi
 
 export async function load() {
   const [nbs, subj] = await Promise.all([db.all('notebooks'), db.meta('subjects')])
-  for (const nb of nbs) state.notebooks.set(nb.id, nb)
+  for (const nb of nbs) { if (nb.thumb) { delete nb.thumb; db.put('notebooks', nb) } state.notebooks.set(nb.id, nb) }
   state.subjects = subj || [
     { id: 's1', name: 'General', color: SUBJECT_COLORS[0] }
   ]
@@ -53,17 +54,46 @@ export async function createNotebook(o) {
   const doc = newDoc(nb)
   state.notebooks.set(nb.id, nb)
   state.docs.set(nb.id, doc)
-  await db.multi([['put', 'notebooks', nb], ['put', 'docs', clean(doc)]])
+  await writeDoc(nb, doc)
   emit('notebooks')
   emit('saved', nb.id)
   return nb
 }
 
+const pageKey = (nb, pid) => nb + '/' + pid
+const metaOf = (nb) => { const m = { ...nb }; delete m.thumb; return m }
+
+/** Writes a whole notebook in the compact page format (used for new, copied and imported ones). */
+async function writeDoc(nb, doc) {
+  const old = await db.keysByIndex('pages', 'nb', nb.id).catch(() => [])
+  const keep = new Set(doc.pages.map(p => pageKey(nb.id, p.id)))
+  const ops = [['put', 'notebooks', metaOf(nb)], ['put', 'docs', { id: nb.id, v: 2, order: doc.pages.map(p => p.id) }]]
+  for (const p of doc.pages) ops.push(['put', 'pages', { k: pageKey(nb.id, p.id), nb: nb.id, id: p.id, items: packItems(p.items) }])
+  for (const k of old) if (!keep.has(k)) ops.push(['del', 'pages', k])
+  await db.multi(ops)
+  doc._saved = new Set(doc.pages.map(p => p.id))
+}
+
+/** Reads a notebook's pages; old (v1) notebooks are converted and rewritten compactly. */
+export async function loadDoc(id) {
+  const rec = await db.get('docs', id)
+  if (rec && rec.v === 2) {
+    const rows = await db.byIndex('pages', 'nb', id)
+    const by = new Map(rows.map(r => [r.id, r]))
+    const doc = { id, pages: rec.order.map(pid => ({ id: pid, items: unpackItems(by.get(pid)?.items) })) }
+    doc._saved = new Set(rows.map(r => r.id))
+    return { doc, old: false }
+  }
+  if (rec && rec.pages) return { doc: { id, pages: rec.pages.map(p => ({ id: p.id, items: unpackItems(p.items) })) }, old: true }
+  return { doc: null, old: false }
+}
+
 export async function openDoc(id) {
   if (state.docs.has(id)) return state.docs.get(id)
-  let doc = await db.get('docs', id)
-  if (!doc) doc = newDoc(state.notebooks.get(id))
+  let { doc, old } = await loadDoc(id)
+  if (!doc) { doc = newDoc(state.notebooks.get(id)); old = true }
   state.docs.set(id, doc)
+  if (old && state.notebooks.has(id)) await writeDoc(state.notebooks.get(id), doc)
   return doc
 }
 
@@ -71,17 +101,24 @@ export const pageSize = (nb) => (nb.type === 'canvas' ? null : A4[nb.orient] || 
 
 // ---- saving
 
-const pending = new Set()
+// What changed since the last save, per notebook: its details, its page order, which pages.
+const pending = new Map()
 let timer = 0, retryDelay = 1500
 
-/** Marks a notebook as changed; it is written to this device within a moment. */
-export function touch(id, { meta = false } = {}) {
+/** Marks a notebook as changed; it is written to this device within a moment.
+ *  page: the id of the one page that changed. order: pages were added, removed or moved.
+ *  meta: only the notebook's details (title, lining...). With none of these, every page is saved. */
+export function touch(id, { meta = false, page = null, order = false } = {}) {
   const nb = state.notebooks.get(id)
   if (!nb) return
-  nb.updated = Date.now()
+  if (!meta) nb.updated = Date.now()
   const doc = state.docs.get(id)
   if (doc) nb.pages = doc.pages.length
-  pending.add(id)
+  let p = pending.get(id)
+  if (!p) pending.set(id, (p = { pages: new Set(), order: false, all: false }))
+  if (page) p.pages.add(page)
+  if (order) p.order = true
+  if (!meta && !page && !order) p.all = true
   emit('dirty', id)
   clearTimeout(timer)
   timer = setTimeout(flush, meta ? 50 : 350)
@@ -93,26 +130,40 @@ export async function flush() {
   clearTimeout(timer)
   if (!pending.size || state.saving) return
   state.saving = true
-  const ids = [...pending]
+  const batch = new Map(pending)
   pending.clear()
   const ops = []
-  for (const id of ids) {
+  for (const [id, p] of batch) {
     const nb = state.notebooks.get(id)
     if (!nb) continue
-    ops.push(['put', 'notebooks', nb])
+    ops.push(['put', 'notebooks', metaOf(nb)])
     const doc = state.docs.get(id)
-    if (doc) ops.push(['put', 'docs', clean(doc)])
+    if (!doc) continue
+    const saved = doc._saved || new Set()
+    const ids = doc.pages.map(pg => pg.id)
+    const write = new Set(p.all ? ids : [...p.pages].filter(x => ids.includes(x)))
+    if (p.order || p.all) {
+      for (const pid of ids) if (!saved.has(pid)) write.add(pid)
+      for (const pid of saved) if (!ids.includes(pid)) ops.push(['del', 'pages', pageKey(id, pid)])
+      ops.push(['put', 'docs', { id, v: 2, order: ids }])
+    }
+    for (const pg of doc.pages) if (write.has(pg.id)) ops.push(['put', 'pages', { k: pageKey(id, pg.id), nb: id, id: pg.id, items: packItems(pg.items) }])
   }
   try {
     await db.multi(ops)
+    for (const [id] of batch) { const doc = state.docs.get(id); if (doc) doc._saved = new Set(doc.pages.map(pg => pg.id)) }
     state.saveError = null
     retryDelay = 1500
     state.saving = false
-    for (const id of ids) emit('saved', id)
-    scheduleThumbs(ids)
+    for (const [id] of batch) emit('saved', id)
+    scheduleThumbs([...batch.keys()])
   } catch (err) {
     // Keep everything queued and try again; the in-memory copy is still the latest.
-    for (const id of ids) pending.add(id)
+    for (const [id, p] of batch) {
+      const cur = pending.get(id)
+      if (!cur) pending.set(id, p)
+      else { p.pages.forEach(x => cur.pages.add(x)); cur.order ||= p.order; cur.all ||= p.all }
+    }
     state.saving = false
     state.saveError = String(err && err.message || err)
     emit('saveError', state.saveError)
@@ -133,7 +184,9 @@ export async function updateNotebook(id, patch) {
 export async function deleteForever(id) {
   state.notebooks.delete(id)
   state.docs.delete(id)
-  await db.multi([['del', 'notebooks', id], ['del', 'docs', id]])
+  const keys = await db.keysByIndex('pages', 'nb', id).catch(() => [])
+  await db.multi([['del', 'notebooks', id], ['del', 'docs', id], ['del', 'thumbs', id], ...keys.map(k => ['del', 'pages', k])])
+  dropThumbURL(id)
   emit('notebooks')
   emit('deleted', id)
 }
@@ -141,11 +194,12 @@ export async function deleteForever(id) {
 export async function duplicateNotebook(id) {
   const src = state.notebooks.get(id)
   const doc = clean(await openDoc(id))
-  const nb = { ...clean(src), id: uid(), title: src.title + ' copy', created: Date.now(), updated: Date.now(), base: {}, thumb: src.thumb }
+  const nb = { ...clean(src), id: uid(), title: src.title + ' copy', created: Date.now(), updated: Date.now(), base: {} }
   doc.id = nb.id
   state.notebooks.set(nb.id, nb)
   state.docs.set(nb.id, doc)
-  await db.multi([['put', 'notebooks', nb], ['put', 'docs', doc]])
+  await writeDoc(nb, doc)
+  scheduleThumbs([nb.id])
   emit('notebooks')
   emit('saved', nb.id)
   return nb
@@ -153,9 +207,10 @@ export async function duplicateNotebook(id) {
 
 /** Puts a notebook pulled from the cloud on this device. */
 export async function importNotebook(nb, doc) {
+  delete nb.thumb
   state.notebooks.set(nb.id, nb)
   state.docs.set(nb.id, doc)
-  await db.multi([['put', 'notebooks', nb], ['put', 'docs', doc]])
+  await writeDoc(nb, doc)
   scheduleThumbs([nb.id])
   emit('notebooks')
 }
@@ -174,14 +229,15 @@ export function blobIds(doc) {
   return [...s]
 }
 
-// ---- thumbnails for the library
+// ---- thumbnails for the library: small JPEGs in their own store, made a while after editing stops
 
 const thumbQ = new Set()
 let thumbT = 0
+const thumbURLs = new Map()
 function scheduleThumbs(ids) {
   ids.forEach(i => thumbQ.add(i))
   clearTimeout(thumbT)
-  thumbT = setTimeout(runThumbs, 900)
+  thumbT = setTimeout(runThumbs, 2500)
 }
 async function runThumbs() {
   for (const id of [...thumbQ]) {
@@ -190,15 +246,32 @@ async function runThumbs() {
     if (!nb) continue
     try {
       const doc = await openDoc(id)
-      nb.thumb = renderThumb(nb, doc)
-      await db.put('notebooks', nb)
+      const c = renderThumb(nb, doc)
+      const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.72))
+      await db.put('thumbs', { id, blob, at: nb.updated })
+      dropThumbURL(id)
       emit('thumb', id)
     } catch { }
     await new Promise(r => setTimeout(r, 30))
   }
 }
+function dropThumbURL(id) { const u = thumbURLs.get(id); if (u) { URL.revokeObjectURL(u); thumbURLs.delete(id) } }
+/** Object URL of a notebook's preview, or null. Made once and reused, so cards do not reload. */
+export async function thumbURL(id) {
+  if (thumbURLs.has(id)) return thumbURLs.get(id)
+  const r = await db.get('thumbs', id).catch(() => null)
+  if (!r) {
+    // Older notebooks: make one now.
+    const nb = state.notebooks.get(id)
+    if (nb && !thumbQ.has(id)) scheduleThumbs([id])
+    return null
+  }
+  const u = URL.createObjectURL(r.blob)
+  thumbURLs.set(id, u)
+  return u
+}
 
-export function renderThumb(nb, doc, W = 360) {
+export function renderThumb(nb, doc, W = 240) {
   const c = document.createElement('canvas')
   const ctx = c.getContext('2d')
   if (nb.type === 'canvas') {
@@ -224,7 +297,7 @@ export function renderThumb(nb, doc, W = 360) {
     ctx.setTransform(s, 0, 0, s, 0, 0)
     drawPage(ctx, nb, doc.pages[0], size, null, s)
   }
-  return c.toDataURL('image/jpeg', 0.82)
+  return c
 }
 
 function drawCanvasView(ctx, nb, page, view, s) {
@@ -236,9 +309,13 @@ function drawCanvasView(ctx, nb, page, view, s) {
 
 export async function exportBackup() {
   await flush()
-  const [nbs, docs, blobs] = await Promise.all([db.all('notebooks'), db.all('docs'), db.all('blobs')])
+  const [nbs, blobs] = await Promise.all([db.all('notebooks'), db.all('blobs')])
   const b64 = async (blob) => { const buf = new Uint8Array(await blob.arrayBuffer()); let s = ''; for (let i = 0; i < buf.length; i += 0x8000) s += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000)); return btoa(s) }
-  const out = { app: 'CocoaNotes', v: 1, at: new Date().toISOString(), subjects: state.subjects, notebooks: nbs, docs, blobs: [] }
+  const out = { app: 'CocoaNotes', v: 2, at: new Date().toISOString(), subjects: state.subjects, notebooks: [], blobs: [] }
+  for (const nb of nbs) {
+    const { doc } = await loadDoc(nb.id)
+    out.notebooks.push({ nb: metaOf(nb), pages: (doc ? doc.pages : []).map(p => ({ id: p.id, items: itemsToJSON(p.items) })) })
+  }
   for (const b of blobs) out.blobs.push({ id: b.id, type: b.type || b.blob.type, data: await b64(b.blob) })
   return new Blob([JSON.stringify(out)], { type: 'application/json' })
 }
@@ -253,22 +330,35 @@ export async function importBackup(file) {
     for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i)
     ops.push(['put', 'blobs', { id: b.id, blob: new Blob([u], { type: b.type }), type: b.type, created: Date.now() }])
   }
-  const docs = new Map((data.docs || []).map(d => [d.id, d]))
+  await db.multi(ops)
+  // v2 files carry each notebook with its pages; v1 files had separate lists.
+  const list = data.v === 2 ? data.notebooks.map(x => ({ nb: x.nb, doc: { id: x.nb.id, pages: x.pages.map(p => ({ id: p.id, items: itemsFromJSON(p.items) })) } }))
+    : (data.notebooks || []).map(nb => { const d = (data.docs || []).find(x => x.id === nb.id); return { nb, doc: d ? { id: nb.id, pages: d.pages.map(p => ({ id: p.id, items: unpackItems(p.items) })) } : newDoc(nb) } })
   let added = 0
-  for (const nb of data.notebooks || []) {
+  for (const { nb, doc } of list) {
     const cur = state.notebooks.get(nb.id)
     if (cur && cur.updated >= nb.updated) continue
-    ops.push(['put', 'notebooks', nb])
-    if (docs.has(nb.id)) ops.push(['put', 'docs', docs.get(nb.id)])
+    delete nb.thumb
     state.notebooks.set(nb.id, nb)
-    state.docs.delete(nb.id)
+    state.docs.set(nb.id, doc)
+    await writeDoc(nb, doc)
+    scheduleThumbs([nb.id])
     added++
   }
   for (const s of data.subjects || []) if (!state.subjects.some(x => x.id === s.id)) state.subjects.push(s)
-  await db.multi(ops)
   await saveSubjects()
   emit('notebooks')
   return added
+}
+
+/** How much space notes and pictures take on this device, in bytes. */
+export async function usage() {
+  const [pages, blobs, thumbs] = await Promise.all([db.all('pages'), db.all('blobs'), db.all('thumbs')])
+  let ink = 0, pics = 0, prev = 0
+  for (const p of pages) for (const it of p.items) { ink += 60; if (it.p) ink += it.p.byteLength; if (it.text) ink += it.text.length * 2 }
+  for (const b of blobs) pics += b.blob.size
+  for (const t of thumbs) prev += t.blob.size
+  return { ink, pics, prev }
 }
 
 window.addEventListener('pagehide', () => { flush() })

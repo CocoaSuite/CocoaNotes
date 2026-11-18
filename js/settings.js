@@ -1,6 +1,6 @@
 // Settings: interface, pen and touch, paper defaults, cloud sync, storage and backups.
 import { h, icon, sheet, toast, download, confirmSheet } from './ui.js'
-import { settings, saveSettings, exportBackup, importBackup, state } from './store.js'
+import { settings, saveSettings, exportBackup, importBackup, state, usage } from './store.js'
 import { PROVIDERS, syncInfo, onSync, retryNow, pull } from './sync.js'
 import { persist } from './db.js'
 import { LININGS_J, LININGS_C, PAPERS } from './render.js'
@@ -96,9 +96,12 @@ const PANES = {
     ]
   },
   storage: () => {
+    const fmt = (b) => (b < 1024 ? b + ' B' : b < 1048576 ? (b / 1024).toFixed(b < 10240 ? 1 : 0) + ' KB' : (b / 1048576).toFixed(1) + ' MB')
     const est = h('span', { class: 'mute small' }, 'Checking…')
     const pst = h('span', { class: 'mute small' }, '')
-    navigator.storage?.estimate?.().then(e => { est.textContent = `${(e.usage / 1048576).toFixed(1)} MB used on this device` })
+    Promise.all([usage(), navigator.storage?.estimate?.().catch(() => null)]).then(([u, e]) => {
+      est.textContent = `Notes ${fmt(u.ink)}, pictures ${fmt(u.pics)}, previews ${fmt(u.prev)}.` + (e ? ` The browser reports ${fmt(e.usage)} in all, including the app itself for offline use and space it has not tidied up yet.` : '')
+    })
     navigator.storage?.persisted?.().then(p => { pst.textContent = p ? 'Protected: the browser will not clear your notes to free space.' : 'Not protected yet. Adding CocoaNotes to your Home Screen protects it.' })
     const pick = h('input', { type: 'file', accept: '.json,application/json', hidden: true, onchange: async (e) => {
       const f = e.target.files[0]; if (!f) return
