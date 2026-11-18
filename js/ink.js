@@ -125,7 +125,8 @@ export function smoothPts(item) {
   return out
 }
 
-/** Variable-width ribbon with round ends. */
+/** Variable-width ribbon with round ends. The end caps bulge outward (sweep 0 in the y-down page
+ *  space), so they cover the stroke's ends instead of cutting into them. */
 function ribbonPath(item) {
   const P = smoothPts(item), n = P.length / 3, base = item.w
   const flat = item.pen === 'high'
@@ -154,10 +155,10 @@ function ribbonPath(item) {
   let d = `M${r2(L[0][0])} ${r2(L[0][1])}`
   d += curve(L)
   const rE = W[n - 1]
-  d += flat ? `L${r2(R[n - 1][0])} ${r2(R[n - 1][1])}` : `A${r2(rE)} ${r2(rE)} 0 0 1 ${r2(R[n - 1][0])} ${r2(R[n - 1][1])}`
+  d += flat ? `L${r2(R[n - 1][0])} ${r2(R[n - 1][1])}` : `A${r2(rE)} ${r2(rE)} 0 0 0 ${r2(R[n - 1][0])} ${r2(R[n - 1][1])}`
   d += curve(R.reverse())
   const rS = W[0]
-  d += flat ? 'Z' : `A${r2(rS)} ${r2(rS)} 0 0 1 ${r2(L[0][0])} ${r2(L[0][1])}Z`
+  d += flat ? 'Z' : `A${r2(rS)} ${r2(rS)} 0 0 0 ${r2(L[0][0])} ${r2(L[0][1])}Z`
   return d
 }
 
